@@ -25,7 +25,8 @@ import pandas as pd
 
 from ffmodel.models.base import logit, sample_model, squeeze_unit
 
-PREDICTORS = ["prior_share_logit", "late_share_logit", "vacated", "age_c", "age_c2", "team_change"]
+PREDICTORS = ["prior_share_logit", "late_share_logit", "vacated", "competition",
+              "age_c", "age_c2", "team_change"]
 
 
 @dataclass
@@ -36,6 +37,7 @@ class BetaShareModel:
     prior_col: str           # "target_share" or "carry_share"
     late_col: str            # "late_target_share" or "late_carry_share"
     vacated_col: str         # "vacated_target_share" or "vacated_carry_share"
+    comp_col: str            # "incoming_comp_target" or "incoming_comp_carry"
     positions: list[str] = field(default_factory=list)
     age_mean: float = 26.0
     idata: object = None
@@ -53,6 +55,9 @@ class BetaShareModel:
                 "prior_share_logit": logit(d[self.prior_col]),
                 "late_share_logit": logit(d[self.late_col]),
                 "vacated": d[self.vacated_col].fillna(0.0).to_numpy(),
+                "competition": d.get(
+                    self.comp_col, pd.Series(0.0, index=d.index)
+                ).fillna(0.0).to_numpy(),
                 "age_c": age_c.to_numpy(),
                 "age_c2": (age_c ** 2).to_numpy(),
                 "team_change": d.get("team_change", pd.Series(0, index=d.index)).to_numpy(),
@@ -123,7 +128,8 @@ class BetaShareModel:
 
 def fit_target_share(transitions: pd.DataFrame, **kw) -> BetaShareModel:
     return BetaShareModel(
-        "next_target_share", "target_share", "late_target_share", "vacated_target_share"
+        "next_target_share", "target_share", "late_target_share",
+        "vacated_target_share", "incoming_comp_target",
     ).fit(transitions, **kw)
 
 
@@ -131,5 +137,6 @@ def fit_carry_share(transitions: pd.DataFrame, positions=("RB",), **kw) -> BetaS
     # Carries are ~0 for WR/TE; restrict to backfield positions.
     sub = transitions[transitions["position"].isin(positions)].copy()
     return BetaShareModel(
-        "next_carry_share", "carry_share", "late_carry_share", "vacated_carry_share"
+        "next_carry_share", "carry_share", "late_carry_share",
+        "vacated_carry_share", "incoming_comp_carry",
     ).fit(sub, **kw)

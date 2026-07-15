@@ -49,3 +49,15 @@ def test_project_next_season_bands_ordered(transitions, target_model):
     assert (proj["proj_opp_p10"] <= proj["proj_opp_p50"] + 1e-9).all()
     assert (proj["proj_opp_p50"] <= proj["proj_opp_p90"] + 1e-9).all()
     assert (proj["proj_opp_mean"] >= 0).all()
+
+
+def test_more_competition_lowers_carry_projection(transitions):
+    # The carry model learns a strongly negative competition coefficient, so
+    # adding incoming RB competition must reduce projected carry share.
+    rbs = transitions[transitions["position"] == "RB"]
+    model = vs.fit_carry_share(transitions, **FIT_KW)
+    low = rbs.copy();  low["incoming_comp_carry"] = 0.0
+    high = rbs.copy(); high["incoming_comp_carry"] = 0.5
+    mean_low = model.predict_samples(low).mean()
+    mean_high = model.predict_samples(high).mean()
+    assert mean_high < mean_low

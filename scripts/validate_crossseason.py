@@ -30,12 +30,20 @@ FIT_KW = dict(draws=600, tune=600, chains=2)
 
 
 def vacated_signal(trans: pd.DataFrame) -> None:
-    print("1) Vacated opportunity vs returning teammates' realized Δ(carry share):")
+    print("1) Opportunity signals vs returning RBs' realized Δ(carry share):")
     rb = trans[trans["position"] == "RB"].copy()
     rb["delta_carry"] = rb["next_carry_share"] - rb["carry_share"]
     sub = rb.dropna(subset=["vacated_carry_share", "delta_carry"])
-    rho = sub["vacated_carry_share"].rank().corr(sub["delta_carry"].rank())
-    print(f"   RB: n={len(sub):,}  Spearman(vacated_carry -> Δcarry_share) = {rho:+.3f}\n")
+
+    def rho(x):
+        return sub[x].rank().corr(sub["delta_carry"].rank())
+
+    # Net opportunity (vacated - incoming competition) should track realized
+    # change better than vacated alone: competition is the other half.
+    print(f"   RB: n={len(sub):,}")
+    print(f"     Spearman(vacated_carry            -> Δ) = {rho('vacated_carry_share'):+.3f}")
+    print(f"     Spearman(incoming_comp_carry      -> Δ) = {rho('incoming_comp_carry'):+.3f}")
+    print(f"     Spearman(net_carry_opportunity    -> Δ) = {rho('net_carry_opportunity'):+.3f}\n")
 
 
 def backtest(trans: pd.DataFrame) -> None:

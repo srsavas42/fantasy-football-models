@@ -73,7 +73,12 @@ carry_model  = vs.fit_carry_share(train)
 sv.breakout_report(test, target_model, carry_model, threshold=0.05)  # ranked P(volume uptick)
 ```
 
-The Beta share model is centered on year-over-year persistence (share is sticky) and adjusts for **vacated opportunity** (volume freed when teammates leave), an age curve, and late-season role changes. It roughly matches a persistence baseline on point error but adds calibrated ~80% intervals and per-player breakout probabilities — see `scripts/validate_crossseason.py`. v1 covers returning players only; incoming rookies (who also claim vacated opportunity) are a later addition.
+The Beta share model is centered on year-over-year persistence (share is sticky) and adjusts for both sides of the opportunity ledger:
+
+- **Vacated opportunity** — volume freed when teammates leave (from roster diffs).
+- **Incoming competition** — volume claimed by players *arriving* at the same position: signed/traded veterans (their prior-team share) and drafted rookies (draft capital, `features/draft.py`). This is the other half — freed targets mean little if the team also signed a star and drafted a receiver.
+
+Modeling competition matters: for RBs the competition coefficient is strongly negative and it *unmasks* the vacated-opportunity signal (its coefficient roughly 6× larger once competition is controlled for). Net opportunity (vacated − competition) tracks realized carry-share change far better than vacated alone (Spearman ~0.26 vs ~0.03) — see `scripts/validate_crossseason.py`. It roughly matches a persistence baseline on point error but adds calibrated ~80% intervals and per-player breakout probabilities. v1 covers returning players as the subjects (rookies enter only as competition, not yet as projected players); the veteran-competition proxy and rookie draft data use the offline combine file, upgraded to nflverse draft picks when online.
 
 ## Roadmap
 

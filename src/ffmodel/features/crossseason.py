@@ -124,6 +124,10 @@ def season_usage(seasons: Iterable[int], source: str = "auto") -> pd.DataFrame:
     usage[["late_target_share", "late_carry_share"]] = usage[
         ["late_target_share", "late_carry_share"]
     ].fillna(0.0)
+    # The list-comprehension assignments above yield object dtype; coerce the
+    # share columns to float so downstream arithmetic stays numeric.
+    for col in ("target_share", "carry_share", "late_target_share", "late_carry_share"):
+        usage[col] = usage[col].astype(float)
     # Team-relative opportunity share (targets + carries, each vs team totals).
     usage["opportunity_share"] = usage["target_share"] + usage["carry_share"]
     usage["key"] = player_key(usage)
@@ -185,6 +189,75 @@ def vacated_opportunity(usage: pd.DataFrame, from_season: int) -> pd.DataFrame:
     return vac
 
 
+def _safe_draft_capital(seasons, source):
+    """Load draft capital, degrading to None if the source is unavailable."""
+    from ffmodel.features.draft import load_draft_capital
+
+    try:
+        dc = load_draft_capital(seasons, source=source)
+        return dc if not dc.empty else None
+    except Exception:
+        return None
+
+
+def incoming_competition(
+    usage: pd.DataFrame, from_season: int, draft_capital: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    """Competition *arriving* on each team entering `from_season + 1`.
+
+    Two sources of new mouths to feed, both offsetting vacated opportunity:
+      * incoming veterans — players on team T in Y+1 who were elsewhere in Y;
+        their Y share (on the old team) proxies the claim they bring.
+      * incoming rookies — drafted to T for Y+1; claim proxied by draft capital
+        (`features.draft.expected_rookie_claim`).
+
+    Returns per team: `incoming_comp_target` / `incoming_comp_carry`, keyed with
+    `next_season = from_season + 1`.
+    """
+    from ffmodel.features.draft import expected_rookie_claim
+
+    y, yp1 = from_season, from_season + 1
+    cur = usage[usage["season"] == y]
+    nxt = usage[usage["season"] == yp1]
+    prev_membership = set(zip(cur["key"], cur["team"]))
+    prior_share = cur.set_index("key")[["target_share", "carry_share"]]
+
+    # Incoming veterans: on T in Y+1, not on T in Y, but with Y usage elsewhere.
+    is_new = np.array(
+        [(k, t) not in prev_membership for k, t in zip(nxt["key"], nxt["team"])]
+    )
+    incoming = nxt[is_new]
+    incoming = incoming[incoming["key"].isin(prior_share.index)]
+    vet = incoming.merge(
+        prior_share.rename(columns={"target_share": "vt", "carry_share": "vc"}),
+        left_on="key", right_index=True, how="left",
+    )
+    vet_agg = vet.groupby("team").agg(
+        incoming_comp_target=("vt", "sum"), incoming_comp_carry=("vc", "sum")
+    )
+
+    # Incoming rookies: drafted to T for the Y+1 season.
+    rook_agg = pd.DataFrame(columns=["incoming_comp_target", "incoming_comp_carry"])
+    if draft_capital is not None and not draft_capital.empty:
+        rk = draft_capital[draft_capital["season"] == yp1].copy()
+        if not rk.empty:
+            claims = rk.apply(
+                lambda r: expected_rookie_claim(r["overall_pick"], r["position"]),
+                axis=1, result_type="expand",
+            )
+            rk["incoming_comp_target"] = claims[0].to_numpy()
+            rk["incoming_comp_carry"] = claims[1].to_numpy()
+            rook_agg = rk.groupby("team")[
+                ["incoming_comp_target", "incoming_comp_carry"]
+            ].sum()
+
+    comp = vet_agg.add(rook_agg, fill_value=0.0).reset_index().rename(
+        columns={"index": "team"}
+    )
+    comp["next_season"] = yp1
+    return comp
+
+
 def build_transitions(seasons: Iterable[int], source: str = "auto") -> pd.DataFrame:
     """One row per returning player transition (Y -> Y+1) with predictors + labels.
 
@@ -194,6 +267,7 @@ def build_transitions(seasons: Iterable[int], source: str = "auto") -> pd.DataFr
     seasons = sorted(set(seasons))
     usage = season_usage(seasons, source=source)
     usage = usage[usage["position"].isin(SKILL_POSITIONS)]
+    draft_capital = _safe_draft_capital(seasons, source)
 
     out = []
     for y in seasons[:-1]:
@@ -203,16 +277,23 @@ def build_transitions(seasons: Iterable[int], source: str = "auto") -> pd.DataFr
         cur = usage[usage["season"] == y].copy()
         nxt = usage[usage["season"] == yp1].copy()
         vac = vacated_opportunity(usage, y)
+        comp = incoming_competition(usage, y, draft_capital)
 
         merged = cur.merge(
             nxt[["key", "team", "target_share", "carry_share", "opportunity_share"]],
             on="key", suffixes=("", "_next"),
         )
         merged["team_change"] = (merged["team"] != merged["team_next"]).astype(int)
-        # Vacated share belongs to the Y+1 team the player is actually on.
+        # Vacated share and incoming competition both belong to the Y+1 team.
         merged = merged.merge(
             vac.rename(columns={"team": "team_next"})[
                 ["team_next", "vacated_target_share", "vacated_carry_share"]
+            ],
+            on="team_next", how="left",
+        )
+        merged = merged.merge(
+            comp.rename(columns={"team": "team_next"})[
+                ["team_next", "incoming_comp_target", "incoming_comp_carry"]
             ],
             on="team_next", how="left",
         )
@@ -222,8 +303,16 @@ def build_transitions(seasons: Iterable[int], source: str = "auto") -> pd.DataFr
     if not out:
         return pd.DataFrame()
     trans = pd.concat(out, ignore_index=True)
-    for col in ("vacated_target_share", "vacated_carry_share"):
+    for col in ("vacated_target_share", "vacated_carry_share",
+                "incoming_comp_target", "incoming_comp_carry"):
         trans[col] = trans[col].fillna(0.0)
+    # Net available opportunity: freed volume minus arriving competition.
+    trans["net_target_opportunity"] = (
+        trans["vacated_target_share"] - trans["incoming_comp_target"]
+    )
+    trans["net_carry_opportunity"] = (
+        trans["vacated_carry_share"] - trans["incoming_comp_carry"]
+    )
     trans = trans.rename(
         columns={
             "target_share_next": "next_target_share",
