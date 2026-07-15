@@ -76,7 +76,8 @@ def season_usage(seasons: Iterable[int], source: str = "auto") -> pd.DataFrame:
     for season in seasons:
         sea = pw[pw["season"] == season]
         team_tot = sea.groupby("team").agg(
-            team_targets=("targets", "sum"), team_carries=("rush_att", "sum")
+            team_targets=("targets", "sum"), team_carries=("rush_att", "sum"),
+            team_pass=("pass_att", "sum"),
         )
         late = sea[sea["week"] >= LATE_SEASON_START_WEEK]
         late_tot = late.groupby("team").agg(
@@ -87,7 +88,7 @@ def season_usage(seasons: Iterable[int], source: str = "auto") -> pd.DataFrame:
             sea[sea["team"] == sea["main_team"]]
             .groupby(["player_name", "position", "season", "team"], dropna=False)
             .agg(targets=("targets", "sum"), rush_att=("rush_att", "sum"),
-                 games=("is_active", "sum"))
+                 pass_att=("pass_att", "sum"), games=("is_active", "sum"))
             .reset_index()
         )
         agg["target_share"] = [
@@ -97,6 +98,11 @@ def season_usage(seasons: Iterable[int], source: str = "auto") -> pd.DataFrame:
         agg["carry_share"] = [
             _safe_div(c, team_tot.loc[tm, "team_carries"]) if tm in team_tot.index else 0.0
             for c, tm in zip(agg["rush_att"], agg["team"])
+        ]
+        # Pass share = fraction of team pass attempts the player threw (QBs).
+        agg["pass_share"] = [
+            _safe_div(p, team_tot.loc[tm, "team_pass"]) if tm in team_tot.index else 0.0
+            for p, tm in zip(agg["pass_att"], agg["team"])
         ]
         # Late-season shares (role signal that projects forward).
         late_agg = (
@@ -126,7 +132,8 @@ def season_usage(seasons: Iterable[int], source: str = "auto") -> pd.DataFrame:
     ].fillna(0.0)
     # The list-comprehension assignments above yield object dtype; coerce the
     # share columns to float so downstream arithmetic stays numeric.
-    for col in ("target_share", "carry_share", "late_target_share", "late_carry_share"):
+    for col in ("target_share", "carry_share", "pass_share",
+                "late_target_share", "late_carry_share"):
         usage[col] = usage[col].astype(float)
     # Team-relative opportunity share (targets + carries, each vs team totals).
     usage["opportunity_share"] = usage["target_share"] + usage["carry_share"]
@@ -205,12 +212,17 @@ def add_career_history(usage: pd.DataFrame) -> pd.DataFrame:
     """
     u = usage.sort_values(["key", "season"], kind="stable").copy()
     g = u.groupby("key", sort=False)
-    for res in ("target_share", "carry_share"):
-        hist_col = "hist_" + res.replace("_share", "") + "_share"
-        u[hist_col] = g[res].transform(lambda s: s.ewm(span=3, min_periods=1).mean())
-        trend_col = res.replace("_share", "") + "_trend"
-        u[trend_col] = g[res].transform(lambda s: s - s.shift(1))
-    u[["target_trend", "carry_trend"]] = u[["target_trend", "carry_trend"]].fillna(0.0)
+    trend_cols = []
+    for res in ("target_share", "carry_share", "pass_share"):
+        if res not in u.columns:
+            continue
+        stem = res.replace("_share", "")
+        u[f"hist_{stem}_share"] = g[res].transform(
+            lambda s: s.ewm(span=3, min_periods=1).mean()
+        )
+        u[f"{stem}_trend"] = g[res].transform(lambda s: s - s.shift(1))
+        trend_cols.append(f"{stem}_trend")
+    u[trend_cols] = u[trend_cols].fillna(0.0)
     return u
 
 
@@ -296,7 +308,9 @@ def build_transitions(seasons: Iterable[int], source: str = "auto") -> pd.DataFr
     """
     seasons = sorted(set(seasons))
     usage = season_usage(seasons, source=source)
-    usage = usage[usage["position"].isin(SKILL_POSITIONS)]
+    # QBs are kept so passes can be projected as their own stream; the per-stream
+    # fit_* factories filter to the positions each model applies to.
+    usage = usage[usage["position"].isin(SKILL_POSITIONS + ("QB",))]
     usage = add_career_history(usage)
     draft_capital = _safe_draft_capital(seasons, source)
 
@@ -311,7 +325,8 @@ def build_transitions(seasons: Iterable[int], source: str = "auto") -> pd.DataFr
         comp = incoming_competition(usage, y, draft_capital)
 
         merged = cur.merge(
-            nxt[["key", "team", "target_share", "carry_share", "opportunity_share"]],
+            nxt[["key", "team", "target_share", "carry_share", "pass_share",
+                 "opportunity_share"]],
             on="key", suffixes=("", "_next"),
         )
         merged["team_change"] = (merged["team"] != merged["team_next"]).astype(int)
@@ -348,6 +363,7 @@ def build_transitions(seasons: Iterable[int], source: str = "auto") -> pd.DataFr
         columns={
             "target_share_next": "next_target_share",
             "carry_share_next": "next_carry_share",
+            "pass_share_next": "next_pass_share",
             "opportunity_share_next": "next_opportunity_share",
         }
     )

@@ -136,6 +136,13 @@ class BetaShareModel:
     # ---- predict ---------------------------------------------------------
     def predict_samples(self, transitions: pd.DataFrame) -> np.ndarray:
         """Posterior samples of next-season share, shape (n_players, n_draws)."""
+        unknown = set(transitions["position"].unique()) - set(self.positions)
+        if unknown:
+            raise ValueError(
+                f"{self.target_col} model was fit on {self.positions}; got "
+                f"positions {sorted(unknown)}. Filter to the model's positions "
+                "first (e.g. QBs go through the pass model, not the target model)."
+            )
         X, pos_idx = self._design(transitions, fit=False)
         post = self.idata.posterior
         alpha = post["alpha"].stack(s=("chain", "draw")).to_numpy()   # (n_pos, S)
@@ -166,19 +173,40 @@ def _col(d: pd.DataFrame, name: str) -> np.ndarray:
     return pd.to_numeric(d[name], errors="coerce").fillna(0.0).to_numpy()
 
 
-def fit_target_share(transitions: pd.DataFrame, **kw) -> BetaShareModel:
+# Passes, carries, and targets are modeled as separate streams — they carry
+# different fantasy value, so each returning player's opportunity is projected
+# per stream and recombined downstream, never collapsed into one "opportunity".
+
+def fit_target_share(transitions: pd.DataFrame,
+                     positions=("RB", "WR", "TE"), **kw) -> BetaShareModel:
+    # Pass-catchers only; QBs get ~0 targets and are modeled by fit_pass_share.
+    sub = transitions[transitions["position"].isin(positions)].copy()
     return BetaShareModel(
         "next_target_share", "target_share", "late_target_share",
         "vacated_target_share", "incoming_comp_target",
         hist_col="hist_target_share", trend_col="target_trend",
-    ).fit(transitions, **kw)
+    ).fit(sub, **kw)
 
 
 def fit_carry_share(transitions: pd.DataFrame, positions=("RB",), **kw) -> BetaShareModel:
-    # Carries are ~0 for WR/TE; restrict to backfield positions.
+    # Carries concentrate in the backfield; restrict to RB for now (QB rushing
+    # is a separate regime, a documented future addition).
     sub = transitions[transitions["position"].isin(positions)].copy()
     return BetaShareModel(
         "next_carry_share", "carry_share", "late_carry_share",
         "vacated_carry_share", "incoming_comp_carry",
         hist_col="hist_carry_share", trend_col="carry_trend",
+    ).fit(sub, **kw)
+
+
+def fit_pass_share(transitions: pd.DataFrame, positions=("QB",), **kw) -> BetaShareModel:
+    # Share of team pass attempts a QB threw. There are no vacated/competition
+    # pass columns yet, so those predictors default to zero; persistence (a
+    # QB keeping the starting job) plus age carry the model. Bimodal starter vs
+    # backup, so treat as a coarse v1.
+    sub = transitions[transitions["position"].isin(positions)].copy()
+    return BetaShareModel(
+        "next_pass_share", "pass_share", "pass_share",  # no late-pass split; reuse level
+        "vacated_pass_share", "incoming_comp_pass",     # absent -> zero-filled
+        hist_col="hist_pass_share", trend_col="pass_trend",
     ).fit(sub, **kw)

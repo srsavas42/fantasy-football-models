@@ -22,6 +22,12 @@ import pandas as pd
 from ffmodel.models.volume_season import BetaShareModel
 
 
+def _skill_only(transitions: pd.DataFrame, target_model: BetaShareModel) -> pd.DataFrame:
+    """Opportunity = targets + carries is a skill-position concept; drop QBs
+    (they're projected by the separate pass stream)."""
+    return transitions[transitions["position"].isin(target_model.positions)].copy()
+
+
 def _opportunity_samples(
     transitions: pd.DataFrame, target_model: BetaShareModel,
     carry_model: BetaShareModel | None,
@@ -44,6 +50,7 @@ def project_next_season(
     qs=(0.1, 0.5, 0.9),
 ) -> pd.DataFrame:
     """Per-player next-season share projection with uncertainty bands."""
+    transitions = _skill_only(transitions, target_model)
     opp = _opportunity_samples(transitions, target_model, carry_model)
     out = transitions[["player_name", "position", "team_next", "transition"]].copy()
     out["prior_opp_share"] = transitions["opportunity_share"].to_numpy()
@@ -69,7 +76,7 @@ def breakout_report(
     points of team opportunity). Adds P(decline) for the same threshold so the
     tail risk is visible alongside the upside.
     """
-    df = transitions
+    df = _skill_only(transitions, target_model)
     if "games" in df.columns:
         df = df[df["games"] >= min_prior_games]
     opp = _opportunity_samples(df, target_model, carry_model)

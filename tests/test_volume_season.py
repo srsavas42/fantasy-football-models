@@ -24,14 +24,15 @@ def target_model(transitions):
 
 
 def test_predict_samples_shape_and_range(transitions, target_model):
-    head = transitions.head(20)
+    head = transitions[transitions["position"].isin(target_model.positions)].head(20)
     s = target_model.predict_samples(head)
     assert s.shape[0] == 20
     assert (s > 0).all() and (s < 1).all()  # Beta support
 
 
 def test_predict_quantiles_are_ordered(transitions, target_model):
-    q = target_model.predict_quantiles(transitions.head(30))
+    skill = transitions[transitions["position"].isin(target_model.positions)]
+    q = target_model.predict_quantiles(skill.head(30))
     assert (q["p10"] <= q["p50"] + 1e-9).all()
     assert (q["p50"] <= q["p90"] + 1e-9).all()
 
@@ -49,6 +50,24 @@ def test_project_next_season_bands_ordered(transitions, target_model):
     assert (proj["proj_opp_p10"] <= proj["proj_opp_p50"] + 1e-9).all()
     assert (proj["proj_opp_p50"] <= proj["proj_opp_p90"] + 1e-9).all()
     assert (proj["proj_opp_mean"] >= 0).all()
+
+
+def test_pass_stream_projects_qbs_separately(transitions):
+    # Passes are their own stream: QBs are absent from the target model but
+    # projectable via fit_pass_share, with shares in the Beta support.
+    assert "next_pass_share" in transitions.columns
+    qb = transitions[transitions["position"] == "QB"]
+    assert len(qb) > 0
+    model = vs.fit_pass_share(transitions, **FIT_KW)
+    s = model.predict_samples(qb.head(10))
+    assert s.shape[0] == 10
+    assert (s > 0).all() and (s < 1).all()
+
+
+def test_projections_exclude_qbs(transitions, target_model):
+    # Opportunity projections/breakout must not include QBs.
+    rep = sv.breakout_report(transitions, target_model)
+    assert not (rep["position"] == "QB").any()
 
 
 def test_more_competition_lowers_carry_projection(transitions):
