@@ -58,14 +58,32 @@ print(df.head())
 
 `load_player_weeks` tries nflverse first (richer: player ids, real targets, 18-week seasons kept current) and falls back to the committed CSVs per season when offline.
 
+### Cross-season volume & breakout report (Phase 3A)
+
+```python
+from ffmodel.features import crossseason as cs
+from ffmodel.models import volume_season as vs
+from ffmodel.projections import season_volume as sv
+
+trans = cs.build_transitions(range(2015, 2021), source="legacy")   # returning players, Y->Y+1
+train, test = trans[trans.transition < "2019->2020"], trans[trans.transition == "2019->2020"]
+
+target_model = vs.fit_target_share(train)     # hierarchical Beta (needs the ".[models]" extra)
+carry_model  = vs.fit_carry_share(train)
+sv.breakout_report(test, target_model, carry_model, threshold=0.05)  # ranked P(volume uptick)
+```
+
+The Beta share model is centered on year-over-year persistence (share is sticky) and adjusts for **vacated opportunity** (volume freed when teammates leave), an age curve, and late-season role changes. It roughly matches a persistence baseline on point error but adds calibrated ~80% intervals and per-player breakout probabilities — see `scripts/validate_crossseason.py`. v1 covers returning players only; incoming rookies (who also claim vacated opportunity) are a later addition.
+
 ## Roadmap
 
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Package scaffolding, config, scoring, tests | ✅ |
 | 1 | Hybrid data layer (nflverse + legacy CSVs, parquet cache) | ✅ |
-| 2 | Features: usage shares, empirical role tiers, trailing efficiency, game script, active-set/injury logic | next |
-| 3 | **Volume models** (team plays/pass rate + Dirichlet-Multinomial share) — the foundation | |
+| 2 | Features: usage shares, empirical role tiers, trailing efficiency, game script, active-set/injury logic | ✅ |
+| 3A | **Cross-season volume** (year-over-year share via hierarchical Beta) + breakout report | ✅ |
+| 3B | Within-season **volume models** (team plays/pass rate + Dirichlet-Multinomial share) | next |
 | 4 | Efficiency models (yds/touch, TD, catch rate) | |
 | 5 | Simulation engine: posterior predictive → weekly & season point distributions | |
 | 6 | Evaluation: walk-forward backtests, CRPS/log-score, calibration | |
