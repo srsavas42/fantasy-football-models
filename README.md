@@ -1,41 +1,81 @@
-# Fantasy Football Modelling
+# Fantasy Football Distributional Modeling
 
-This project was undertaken with my interests for both fantasy football and statistical modelling in mind. To get data, I forked an initial repository. In revisiting the project, I found a python library that includes more data, allowing me to expand my analysis. 
+Statistical models that produce **distributions** of fantasy football outcomes — not point estimates — on both season-long and weekly horizons, supporting three pillars:
 
-The models can be found in the "models" folder.
+1. **Draft value** — tier gaps, pre-season expected value, and mid-draft positional trade-offs.
+2. **Volume prediction** — opportunity is king; predict each player's share of team plays.
+3. **Weekly outcomes** — per-week outcome distributions for start/sit and lineup optimization.
 
-## The Plan
-Below is my general plan for creating a fantasy football analysis, including optimizing for draft strategy, player prediction, and weekly start/sit.
+## Architecture
 
-### 1: Draft Value Analysis
-Fantasy football leagues start with a draft, where NFL players are selected to be on different teams. During a week, a team can start 1 QB, 2 RBs, 2 WRs, 1 TE, and 1 FLEX (RB/WR/TE). Each week, teams are placed head-to-head, where the team with the most points will win.
+Fantasy points for a player-week are simulated bottom-up, with each layer a hierarchical Bayesian model (PyMC):
 
-#### Tier-Based Relative Value
-This plan is to first get the relative value for each position, with the objective of finding the biggest differences in player tier performance (i.e. top 4 RBs vs top 8). Tier gaps aim to compare the difference in value between positions at any point in the draft to determine which position should be prioritized. [DONE]
+```
+team plays & pass rate  →  opportunity share  →  per-touch efficiency  →  scoring
+   (NegBinom/Binomial)     (Dirichlet-Multinomial      (hierarchical         (PPR /
+                            over the active roster)     Normal/Poisson)       Half / Std)
+```
 
-#### Pre-Season Expected Value
-The next step is to take the expected value of each player. This entails mapping pre-season rankings to end-of-season rankings to create a distribution of outcomes and an expected value for their scoring. This is important because pre-season and post-season rankings are always significantly different, and understanding the risk/reward trade-off for a player is important to building a team.
+Sampling all layers over posterior draws yields the full outcome distribution; season projections aggregate simulated weeks. Because opportunity shares renormalize over whoever is *active*, a starter's injury automatically flows volume to backups.
 
-#### Mid-Draft Trade-offs
-The final step is to get the comparative value at a particular draft position relative to the next set of players I would be able to draft. For example, is it better to take a QB this round, or should I wait 3 more rounds for a QB in the next tier. This is how I can turn my analysis into actionable draft strategy.
+Key modeling choices:
 
-### 2: Volume Prediction
-One core tenent of fantasy football is that opportunity is king: players with more opportunities to touch the ball have more opportunities to score points. So, I want to do an analysis to try and predict the volume a player would get over the course of the season. I have identified the following critical factors:
+- **Empirical roles over listed depth charts.** Role tiers come from EWMA trailing snap share (route participation where available); listed depth charts + ADP/ECR are only a cold-start fallback for week 1, rookies, and team changes.
+- **Efficiency feeds volume.** Trailing per-opportunity efficiency (yds/route-run, yds/touch) enters the share model — coaches route opportunity to efficient players.
+- **Partial pooling everywhere.** Small-sample players shrink toward position-level priors.
+- **Calibration is the acceptance gate.** Walk-forward backtests score CRPS/log-score against prior-season-PPG and ECR baselines, with PIT/coverage checks that intervals are honest.
 
-1) Depth Chart Position: A player who is starting at the beginning of the season is more likely to get significant opportunity than a player who is a backup.
-2) Coach Scheme: Coaches have different tendencies --- one team might like to throw the ball more, another wants to run. This impacts the opportunity players at different positions have to get the ball.
-3) Injury Risk: Individual players get hurt, which limits their opportunity to play and score. However, when a starter gets hurt, their backup steps into the starting role, changing the dynamics of volume.
+## Package
 
-However, changes in volume can come with side effects, such as potentially decreasing efficiency. So, I would like to do some exploratory analysis on these relationships to get a better understanding of individual prediction.
+Code lives in an installable package under `src/ffmodel/`:
 
-### 3: Weekly Outcomes
-As stated earlier, players have to choose a starting lineup. However, all players can change their starting lineup on different weeks. So, I would like to create a model to predict the distribution of outcomes for any given week such that I can choose a starting lineup by optimizing for various parameters such as expected point totals or upside.
+```
+src/ffmodel/
+  config.py       scoring rules (verified against this repo's CSVs), paths, season coverage
+  data/           hybrid data layer:
+    schema.py       canonical player-week schema shared by every source
+    ingest.py       nflverse via nfl_data_py, parquet-cached (weekly, snaps, depth charts,
+                    injuries, schedules, rosters, id map)
+    legacy.py       the CSVs committed to this repo (weekly 1999-2021, yearly 1970-2021,
+                    snapcounts 2013-2020, FantasyPros ADP/ECR)
+    loaders.py      load_player_weeks(seasons) — one call, one schema, auto source fallback
+  simulation/
+    scoring.py      stat line → fantasy points (reproduces the CSV point columns exactly)
+```
+
+### Quickstart
+
+```bash
+pip install -e ".[dev]"        # add ".[models]" for pymc/arviz when fitting
+pytest                          # network-free test suite
+
+python -c "
+from ffmodel.data import load_player_weeks
+df = load_player_weeks([2019, 2020])
+print(df.head())
+"
+```
+
+`load_player_weeks` tries nflverse first (richer: player ids, real targets, 18-week seasons kept current) and falls back to the committed CSVs per season when offline.
+
+## Roadmap
+
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | Package scaffolding, config, scoring, tests | ✅ |
+| 1 | Hybrid data layer (nflverse + legacy CSVs, parquet cache) | ✅ |
+| 2 | Features: usage shares, empirical role tiers, trailing efficiency, game script, active-set/injury logic | next |
+| 3 | **Volume models** (team plays/pass rate + Dirichlet-Multinomial share) — the foundation | |
+| 4 | Efficiency models (yds/touch, TD, catch rate) | |
+| 5 | Simulation engine: posterior predictive → weekly & season point distributions | |
+| 6 | Evaluation: walk-forward backtests, CRPS/log-score, calibration | |
+| 7 | Weekly pillar: start/sit lineup optimization | |
+| 8 | Draft pillar: tiers, pre-season EV, positional trade-offs | |
+| 9 | Alt-data signal layer: BlueSky/news → live role-prior adjustments (not backtestable, so live-only) | |
 
 # Fantasy Football Data Sets
 
-If you are looking to run the scripts we've provided for locally updating data, clone this repo and install dependencies.
-
-    pip install -r requirements.txt
+This repo began as a fork of [fantasydatapros/data](https://github.com/fantasydatapros/data); the CSVs below remain available and power the legacy loaders and offline tests.
 
 ## Strength of Schedule data
 Strength of Schedule data is available in the sos directory. Data is available going back to 1999. To load this data in pandas using the following the following url format:
@@ -67,7 +107,3 @@ To grab yearly data for 2019 in pandas, do the following:
 
     import pandas as pd
     df = pd.read_csv('https://raw.githubusercontent.com/fantasydatapros/data/master/yearly/2019.csv')
-
-
-
-
