@@ -15,6 +15,7 @@ LEGACY_YEARLY_DIR = REPO_ROOT / "yearly"
 LEGACY_SNAPCOUNTS_DIR = REPO_ROOT / "snapcounts"
 LEGACY_ADP_DIR = REPO_ROOT / "fantasypros" / "adp"
 LEGACY_ECR_DIR = REPO_ROOT / "fantasypros" / "ecr"
+LEGACY_SOS_DIR = REPO_ROOT / "sos"
 
 # Parquet cache for downloaded nflverse data. Override with FFMODEL_CACHE_DIR.
 CACHE_DIR = Path(os.environ.get("FFMODEL_CACHE_DIR", REPO_ROOT / ".cache" / "ffmodel"))
