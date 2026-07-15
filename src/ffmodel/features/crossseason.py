@@ -232,6 +232,11 @@ def incoming_competition(
         prior_share.rename(columns={"target_share": "vt", "carry_share": "vc"}),
         left_on="key", right_index=True, how="left",
     )
+    # Competition is split by resource via each player's own share footprint:
+    # everyone who catches passes adds target competition, everyone who runs adds
+    # carry competition. This already separates e.g. a WR (mostly targets) from a
+    # RB (mostly carries) without excluding any position from the run game, since
+    # QBs (scrambles) and WRs (jet sweeps) carry the ball too.
     vet_agg = vet.groupby("team").agg(
         incoming_comp_target=("vt", "sum"), incoming_comp_carry=("vc", "sum")
     )
