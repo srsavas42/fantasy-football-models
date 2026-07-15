@@ -7,13 +7,21 @@ pooled across positions (small-sample positions borrow strength). The posterior
 predictive gives each player a full next-season share distribution, from which
 projection quantiles and breakout probabilities are read off directly.
 
-Predictors (all from season Y):
-  prior_share_logit  logit of the player's season-Y share (regression to mean)
-  late_share_logit   logit of the weeks>=10 share (a late-year role change that
-                     projects to a full season)
-  vacated            share freed on the Y+1 team by departed players
-  age_c, age_c2      centered age and its square (position age curve)
-  team_change        1 if the player switched teams
+Persistence uses a level + shrinkage decomposition of the full sequence:
+predicted logit-share ~= hist + w*(prior - hist), so `hist` is the multi-year
+anchor and the `excess_vs_hist` weight w in (0,1) says how much a recent spike
+sticks (w->1) vs reverts toward career form (w->0).
+
+Predictors (all from season Y, so nothing leaks from Y+1):
+  hist_share_logit     logit of the multi-year (EWMA) form — the anchor
+  excess_vs_hist       logit(prior) - logit(hist): recent vs career; its weight
+                       is the recency/mean-reversion knob
+  late_share_logit     logit of the weeks>=10 share (a late-year role change)
+  vacated              share freed on the Y+1 team by departed players
+  competition          share claimed by arriving veterans + drafted rookies
+  team_change          1 if the player switched teams
+  excess_x_teamchange  movers carry less of their recent form
+  age_c[POS], age_c2[POS]  position-specific age curve (RBs decline earliest)
 """
 
 from __future__ import annotations
@@ -25,8 +33,13 @@ import pandas as pd
 
 from ffmodel.models.base import logit, sample_model, squeeze_unit
 
-PREDICTORS = ["prior_share_logit", "late_share_logit", "vacated", "competition",
-              "age_c", "age_c2", "team_change"]
+# Prior means/sds on selected slopes: share is persistent, so prior + history
+# slopes together start near 1.0 (persistence), and the model adjusts from there.
+_SLOPE_PRIORS = {
+    "hist_share_logit": (1.0, 0.3),    # multi-year form is the persistence anchor
+    "excess_vs_hist": (0.5, 0.3),      # recency weight in (0,1); <1 => mean reversion
+    "excess_x_teamchange": (0.0, 0.4), # movers carry less recent form
+}
 
 
 @dataclass
@@ -38,33 +51,52 @@ class BetaShareModel:
     late_col: str            # "late_target_share" or "late_carry_share"
     vacated_col: str         # "vacated_target_share" or "vacated_carry_share"
     comp_col: str            # "incoming_comp_target" or "incoming_comp_carry"
+    hist_col: str = ""       # "hist_target_share" or "hist_carry_share"
+    trend_col: str = ""      # "target_trend" or "carry_trend"
     positions: list[str] = field(default_factory=list)
+    predictor_names: list[str] = field(default_factory=list)
     age_mean: float = 26.0
     idata: object = None
 
     # ---- design matrix ---------------------------------------------------
     def _design(self, df: pd.DataFrame, fit: bool = False):
         d = df.copy()
+        age = pd.to_numeric(d["age"], errors="coerce")
         if fit:
-            self.age_mean = float(d["age"].mean())
+            self.age_mean = float(age.mean())
             self.positions = sorted(d["position"].unique())
-        d["age"] = d["age"].fillna(self.age_mean)
-        age_c = (d["age"] - self.age_mean) / 10.0
-        X = pd.DataFrame(
-            {
-                "prior_share_logit": logit(d[self.prior_col]),
-                "late_share_logit": logit(d[self.late_col]),
-                "vacated": d[self.vacated_col].fillna(0.0).to_numpy(),
-                "competition": d.get(
-                    self.comp_col, pd.Series(0.0, index=d.index)
-                ).fillna(0.0).to_numpy(),
-                "age_c": age_c.to_numpy(),
-                "age_c2": (age_c ** 2).to_numpy(),
-                "team_change": d.get("team_change", pd.Series(0, index=d.index)).to_numpy(),
-            }
-        )
+        age_c = ((age.fillna(self.age_mean) - self.age_mean) / 10.0).to_numpy()
+        # Persistence is anchored on the multi-year form (EWMA, which still
+        # weights the latest year most), not last year alone: the two are
+        # collinear and history predicts slightly better.
+        prior_logit = logit(d[self.prior_col])
+        hist_logit = logit(d[self.hist_col]) if self.hist_col else prior_logit
+        excess = prior_logit - hist_logit  # recent form above/below career anchor
+        team_change = pd.to_numeric(
+            d.get("team_change", pd.Series(0, index=d.index)), errors="coerce"
+        ).fillna(0.0).to_numpy()
+
+        cols = {
+            "hist_share_logit": hist_logit,
+            "excess_vs_hist": excess,
+            "late_share_logit": logit(d[self.late_col]),
+            "vacated": _col(d, self.vacated_col),
+            "competition": _col(d, self.comp_col),
+            "team_change": team_change,
+            "excess_x_teamchange": excess * team_change,
+        }
+        # Position-specific age curve: age terms interacted with position dummies,
+        # so an RB and a WR of the same age get different trajectories.
+        for pos in self.positions:
+            mask = (d["position"] == pos).to_numpy(dtype=float)
+            cols[f"age_c[{pos}]"] = age_c * mask
+            cols[f"age_c2[{pos}]"] = (age_c ** 2) * mask
+
+        X = pd.DataFrame(cols)
+        if fit:
+            self.predictor_names = list(X.columns)
         pos_idx = pd.Categorical(d["position"], categories=self.positions).codes
-        return X[PREDICTORS].to_numpy(dtype=float), pos_idx
+        return X[self.predictor_names].to_numpy(dtype=float), pos_idx
 
     # ---- fit -------------------------------------------------------------
     def fit(self, transitions: pd.DataFrame, **sample_kwargs) -> "BetaShareModel":
@@ -82,13 +114,14 @@ class BetaShareModel:
             sd_a = pm.HalfNormal("sd_a", 1.0)
             z_a = pm.Normal("z_a", 0.0, 1.0, shape=n_pos)
             alpha = pm.Deterministic("alpha", mu_a + z_a * sd_a)
-            # Population slopes. Share is strongly persistent year-to-year, so
-            # the prior-share slope (predictor 0) is centered at 1.0 — the model
-            # starts from persistence and adjusts for age / vacated / late-season.
+            # Population slopes, with informative priors on a few (see
+            # _SLOPE_PRIORS): prior + history slopes start near persistence.
             beta_mu = np.zeros(n_pred)
-            beta_mu[PREDICTORS.index("prior_share_logit")] = 1.0
             beta_sd = np.full(n_pred, 1.0)
-            beta_sd[PREDICTORS.index("prior_share_logit")] = 0.4
+            for name, (m, s) in _SLOPE_PRIORS.items():
+                if name in self.predictor_names:
+                    i = self.predictor_names.index(name)
+                    beta_mu[i], beta_sd[i] = m, s
             beta = pm.Normal("beta", mu=beta_mu, sigma=beta_sd, shape=n_pred)
             phi = pm.Gamma("phi", alpha=2.0, beta=0.1)  # Beta precision
 
@@ -126,10 +159,18 @@ class BetaShareModel:
         return out.reset_index(drop=True)
 
 
+def _col(d: pd.DataFrame, name: str) -> np.ndarray:
+    """A numeric column as float, zero-filled, tolerating an absent name."""
+    if not name or name not in d.columns:
+        return np.zeros(len(d), dtype=float)
+    return pd.to_numeric(d[name], errors="coerce").fillna(0.0).to_numpy()
+
+
 def fit_target_share(transitions: pd.DataFrame, **kw) -> BetaShareModel:
     return BetaShareModel(
         "next_target_share", "target_share", "late_target_share",
         "vacated_target_share", "incoming_comp_target",
+        hist_col="hist_target_share", trend_col="target_trend",
     ).fit(transitions, **kw)
 
 
@@ -139,4 +180,5 @@ def fit_carry_share(transitions: pd.DataFrame, positions=("RB",), **kw) -> BetaS
     return BetaShareModel(
         "next_carry_share", "carry_share", "late_carry_share",
         "vacated_carry_share", "incoming_comp_carry",
+        hist_col="hist_carry_share", trend_col="carry_trend",
     ).fit(sub, **kw)

@@ -61,6 +61,26 @@ def test_predictors_from_year_y_labels_from_yp1():
     assert np.isclose(r["next_target_share"], uyp1["target_share"])
 
 
+def test_career_history_is_causal_ewma():
+    # hist at each season must use only that season and earlier (no future leak),
+    # and match a manual EWMA of the sequence so far.
+    u = pd.DataFrame({
+        "player_name": ["P"] * 4,
+        "position": ["WR"] * 4,
+        "season": [2016, 2017, 2018, 2019],
+        "team": ["A"] * 4,
+        "target_share": [0.10, 0.20, 0.30, 0.40],
+        "carry_share": [0.0] * 4,
+    })
+    u["key"] = cs.player_key(u)
+    out = cs.add_career_history(u).sort_values("season")
+    expected = pd.Series([0.10, 0.20, 0.30, 0.40]).ewm(span=3, min_periods=1).mean()
+    assert np.allclose(out["hist_target_share"].to_numpy(), expected.to_numpy())
+    # A rising sequence has positive trend; first season's trend is 0 (no prior).
+    assert out["target_trend"].iloc[0] == 0.0
+    assert (out["target_trend"].iloc[1:] > 0).all()
+
+
 def test_shares_within_unit_interval():
     t = cs.build_transitions([2018, 2019, 2020], source="legacy")
     for col in ("target_share", "carry_share", "next_target_share", "next_carry_share"):

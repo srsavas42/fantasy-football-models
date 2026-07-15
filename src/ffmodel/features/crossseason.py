@@ -189,6 +189,31 @@ def vacated_opportunity(usage: pd.DataFrame, from_season: int) -> pd.DataFrame:
     return vac
 
 
+def add_career_history(usage: pd.DataFrame) -> pd.DataFrame:
+    """Add multi-year form and momentum to each (player, season) row.
+
+    Rather than describe a player by their single most recent season, summarize
+    the whole sequence so far:
+      * `hist_target_share` / `hist_carry_share` — EWMA (span 3) of share over
+        the player's seasons up to and including the current one.
+      * `target_trend` / `carry_trend` — one-year change (this season minus last).
+        Analysis shows momentum mean-reverts, so a positive trend predicts a
+        pullback next year; the model uses the sign accordingly.
+
+    All quantities use only seasons <= the row's season, so nothing leaks from
+    the transition's target year (Y+1).
+    """
+    u = usage.sort_values(["key", "season"], kind="stable").copy()
+    g = u.groupby("key", sort=False)
+    for res in ("target_share", "carry_share"):
+        hist_col = "hist_" + res.replace("_share", "") + "_share"
+        u[hist_col] = g[res].transform(lambda s: s.ewm(span=3, min_periods=1).mean())
+        trend_col = res.replace("_share", "") + "_trend"
+        u[trend_col] = g[res].transform(lambda s: s - s.shift(1))
+    u[["target_trend", "carry_trend"]] = u[["target_trend", "carry_trend"]].fillna(0.0)
+    return u
+
+
 def _safe_draft_capital(seasons, source):
     """Load draft capital, degrading to None if the source is unavailable."""
     from ffmodel.features.draft import load_draft_capital
@@ -272,6 +297,7 @@ def build_transitions(seasons: Iterable[int], source: str = "auto") -> pd.DataFr
     seasons = sorted(set(seasons))
     usage = season_usage(seasons, source=source)
     usage = usage[usage["position"].isin(SKILL_POSITIONS)]
+    usage = add_career_history(usage)
     draft_capital = _safe_draft_capital(seasons, source)
 
     out = []
