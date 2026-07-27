@@ -144,3 +144,15 @@ def load_ids(refresh: bool = False, cache_dir: Path | None = None) -> pd.DataFra
     import nfl_data_py as nfl
 
     return _fetch("ids", nfl.import_ids, refresh=refresh, cache_dir=cache_dir)
+
+
+def load_contracts(refresh: bool = False, cache_dir: Path | None = None) -> pd.DataFrame:
+    """Historical player contracts from OverTheCap (one row per contract).
+
+    Columns include `player`, `position`, `team`, `year_signed`, `years`,
+    `value`, `apy`, `guaranteed`, and `apy_cap_pct` (APY as a share of that
+    year's salary cap — inflation-normalized, the cleanest size signal).
+    """
+    import nfl_data_py as nfl
+
+    return _fetch("contracts", nfl.import_contracts, refresh=refresh, cache_dir=cache_dir)

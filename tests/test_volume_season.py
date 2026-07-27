@@ -61,7 +61,9 @@ def test_pass_stream_projects_qbs_separately(transitions):
     model = vs.fit_pass_share(transitions, **FIT_KW)
     s = model.predict_samples(qb.head(10))
     assert s.shape[0] == 10
-    assert (s > 0).all() and (s < 1).all()
+    # QB pass_share is bimodal (starter vs backup); a near-degenerate Beta can
+    # sample exactly 0/1, so shares are valid in the closed [0, 1].
+    assert (s >= 0).all() and (s <= 1).all()
 
 
 def test_projections_exclude_qbs(transitions, target_model):

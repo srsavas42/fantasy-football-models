@@ -60,12 +60,17 @@ def add_investment(
     source: str = "auto",
     draft_years: Iterable[int] | None = None,
     recency_tau: float = _RECENCY_TAU,
+    contracts: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Attach `draft_value`, `years_since_draft`, and `team_investment` to a
-    frame carrying `player_name`, `position`, and `season` (the as-of year).
+    """Attach investment signals to a frame with `player_name`, `position`,
+    `season` (the as-of year).
 
-    team_investment = draft_value * exp(-years_since_draft / tau). Contract /
-    dead-cap adds in here when that feed is wired; absent, it's draft-only.
+    Always emits draft capital (`draft_value`, `years_since_draft`, and a
+    convenience `team_investment = draft_value * exp(-years_since_draft/tau)`).
+    When a `contracts` frame is supplied (or reachable via
+    `ingest.load_contracts` locally), also emits the veteran contract signals
+    (`contract_value`, `guaranteed_pct`, `contract_year`, `years_remaining`);
+    offline they default to 0 so the pipeline is unchanged.
     """
     out = df.copy()
     if draft_years is None:
@@ -80,4 +85,27 @@ def add_investment(
     decay = np.exp(-years_since.clip(lower=0).fillna(0.0) / recency_tau)
     # No draft capital (undrafted / pre-2000 / missing) -> zero investment.
     out["team_investment"] = np.where(out["draft_value"] > 0, out["draft_value"] * decay, 0.0)
-    return out.drop(columns=["draft_year"])
+    out = out.drop(columns=["draft_year"])
+
+    return _attach_contracts(out, contracts, source)
+
+
+def _attach_contracts(out: pd.DataFrame, contracts, source: str) -> pd.DataFrame:
+    """Merge veteran contract features, defaulting to 0 when unavailable."""
+    from ffmodel.features.contracts import CONTRACT_FEATURES, season_contract_features
+
+    if contracts is None and source != "legacy":
+        try:
+            from ffmodel.data import ingest
+            contracts = ingest.load_contracts()
+        except Exception:
+            contracts = None
+
+    if contracts is not None and not contracts.empty:
+        feats = season_contract_features(contracts, out["season"].unique())
+        out = out.merge(feats, on=["player_name", "position", "season"], how="left")
+    for col in CONTRACT_FEATURES:
+        if col not in out.columns:
+            out[col] = 0.0
+        out[col] = out[col].fillna(0.0)
+    return out

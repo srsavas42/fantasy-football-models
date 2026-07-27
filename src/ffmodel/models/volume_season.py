@@ -24,6 +24,9 @@ Predictors (all from season Y, so nothing leaks from Y+1):
   draft_value          organizational commitment from draft capital
   draft_value_x_years  lets the model learn how that commitment decays with
                        years_since_draft (expected negative)
+  contract_value       veteran commitment from contract size (data-gated; 0 until
+                       the OTC feed is wired locally)
+  contract_value_x_year  learned fade of contract commitment over the deal
   age_c[POS], age_c2[POS]  position-specific age curve (RBs decline earliest)
 """
 
@@ -94,6 +97,12 @@ class BetaShareModel:
             # players (draft_value == 0), so no standalone years term is needed.
             "draft_value": _col(d, "draft_value"),
             "draft_value_x_years": _col(d, "draft_value") * (_col(d, "years_since_draft") / 5.0),
+            # Veteran contract commitment, learned the same way: size plus a
+            # timeline interaction so the model discovers how it fades over the
+            # deal. Zero offline (contracts are data-gated), so a no-op until the
+            # OTC feed is wired locally.
+            "contract_value": _col(d, "contract_value"),
+            "contract_value_x_year": _col(d, "contract_value") * (_col(d, "contract_year") / 3.0),
         }
         # Position-specific age curve: age terms interacted with position dummies,
         # so an RB and a WR of the same age get different trajectories.
