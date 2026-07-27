@@ -81,6 +81,25 @@ def test_career_history_is_causal_ewma():
     assert (out["target_trend"].iloc[1:] > 0).all()
 
 
+def test_team_groups_shares_sum_to_one():
+    g = cs.build_team_groups([2017, 2018, 2019], resource="target", source="legacy")
+    assert not g.empty
+    sums = g.groupby("group_id")["label_share"].sum()
+    assert np.allclose(sums.to_numpy(), 1.0, atol=1e-9)
+    # Rookies appear as group members with zero usage history.
+    rookies = g[g["is_rookie"] == 1]
+    assert len(rookies) > 0
+    assert (rookies["hist_share"] == 0).all()
+
+
+def test_team_groups_carry_resource():
+    g = cs.build_team_groups([2018, 2019], resource="carry", source="legacy")
+    sums = g.groupby("group_id")["label_share"].sum()
+    assert np.allclose(sums.to_numpy(), 1.0, atol=1e-9)
+    # Carry groups are backfield-heavy but include QBs/WRs who run.
+    assert set(g["position"].unique()) <= {"RB", "QB", "WR"}
+
+
 def test_shares_within_unit_interval():
     t = cs.build_transitions([2018, 2019, 2020], source="legacy")
     for col in ("target_share", "carry_share", "next_target_share", "next_carry_share"):

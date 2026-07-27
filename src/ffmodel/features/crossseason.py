@@ -25,6 +25,11 @@ from ffmodel.features.volume import SKILL_POSITIONS
 
 LATE_SEASON_START_WEEK = 10  # weeks >= this define "late season" role signal
 
+# Who competes for each resource's pie. Targets are split across all pass
+# catchers; carries across everyone who runs (QBs scramble, WRs take sweeps).
+TARGET_GROUP = ("WR", "TE", "RB")
+CARRY_GROUP = ("RB", "QB", "WR")
+
 
 def player_key(df: pd.DataFrame) -> pd.Series:
     """Offline-stable player identity (no player_id in the legacy CSVs)."""
@@ -298,6 +303,83 @@ def incoming_competition(
     )
     comp["next_season"] = yp1
     return comp
+
+
+def enrich_usage(seasons: Iterable[int], source: str = "auto") -> pd.DataFrame:
+    """Per (player, season) usage with multi-year history and investment attached.
+
+    The shared feature table behind both the per-player transitions and the
+    team-group allocation. Computed for every season so it can serve either as a
+    label year (Y+1) or a feature year (Y).
+    """
+    from ffmodel.features.investment import add_investment
+
+    usage = season_usage(seasons, source=source)
+    usage = usage[usage["position"].isin(SKILL_POSITIONS + ("QB",))]
+    usage = add_career_history(usage)
+    usage = add_investment(usage, source=source)
+    return usage
+
+
+def build_team_groups(
+    seasons: Iterable[int], resource: str = "target", source: str = "auto"
+) -> pd.DataFrame:
+    """Team-position roster groups for the Dirichlet allocation.
+
+    One row per (team, Y+1, claimant) for each player who saw `resource` volume
+    in Y+1 — the *group* over which next-season shares must sum to 1. Labels
+    (`label_count`, `label_share`) are from Y+1; usage-history features
+    (`hist_share`, `prior_share`, `late_share`) are strictly from Y (0 for
+    rookies with no Y usage); investment and age are as-of the projection year
+    Y+1 (known then, and defined for rookies). `group_id` identifies the simplex;
+    vacated/competition are *not* columns here — they're structural (departed
+    players are absent; adding claimants dilutes the softmax).
+    """
+    resource = resource.lower()
+    positions = TARGET_GROUP if resource == "target" else CARRY_GROUP
+    count_col = "targets" if resource == "target" else "rush_att"
+    hist_col = "hist_target_share" if resource == "target" else "hist_carry_share"
+    prior_col = "target_share" if resource == "target" else "carry_share"
+    late_col = "late_target_share" if resource == "target" else "late_carry_share"
+
+    usage = enrich_usage(seasons, source=source)
+    seasons = sorted(set(seasons))
+    keep_invest = ["age", "draft_value", "years_since_draft", "contract_value", "contract_year"]
+
+    out = []
+    for y in seasons[:-1]:
+        yp1 = y + 1
+        if yp1 not in seasons:
+            continue
+        grp = usage[
+            (usage["season"] == yp1)
+            & (usage["position"].isin(positions))
+            & (usage[count_col] > 0)
+        ].copy()
+        if grp.empty:
+            continue
+        grp["team_total"] = grp.groupby("team")[count_col].transform("sum")
+        grp["label_share"] = grp[count_col] / grp["team_total"]
+
+        # Usage history strictly from Y (Y+1 usage is the label — no leakage).
+        yf = usage[usage["season"] == y][["key", "team", hist_col, prior_col, late_col]]
+        yf = yf.rename(columns={hist_col: "hist_share", prior_col: "prior_share",
+                                late_col: "late_share", "team": "team_y"})
+        m = grp.merge(yf, on="key", how="left")
+        m["is_rookie"] = m["hist_share"].isna().astype(int)  # no Y usage at all
+        for c in ("hist_share", "prior_share", "late_share"):
+            m[c] = m[c].fillna(0.0)
+        m["team_change"] = ((m["team_y"].notna()) & (m["team_y"] != m["team"])).astype(int)
+        m["group_id"] = m["team"].astype(str) + "_" + str(yp1)
+        m["next_season"] = yp1
+        m["resource"] = resource
+        m = m.rename(columns={count_col: "label_count"})
+        cols = (["group_id", "key", "player_name", "position", "team", "next_season",
+                 "label_count", "team_total", "label_share", "hist_share", "prior_share",
+                 "late_share", "team_change", "is_rookie", "resource"] + keep_invest)
+        out.append(m[[c for c in cols if c in m.columns]])
+
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
 
 
 def build_transitions(seasons: Iterable[int], source: str = "auto") -> pd.DataFrame:
