@@ -21,6 +21,8 @@ Predictors (all from season Y, so nothing leaks from Y+1):
   competition          share claimed by arriving veterans + drafted rookies
   team_change          1 if the player switched teams
   excess_x_teamchange  movers carry less of their recent form
+  team_investment      decayed draft capital — an organizational-commitment
+                       prior on role (strongest where usage history is thin)
   age_c[POS], age_c2[POS]  position-specific age curve (RBs decline earliest)
 """
 
@@ -84,6 +86,9 @@ class BetaShareModel:
             "competition": _col(d, self.comp_col),
             "team_change": team_change,
             "excess_x_teamchange": excess * team_change,
+            # Organizational commitment (decayed draft capital): a prior on role
+            # that matters most where usage history is thin.
+            "team_investment": _col(d, "team_investment"),
         }
         # Position-specific age curve: age terms interacted with position dummies,
         # so an RB and a WR of the same age get different trajectories.

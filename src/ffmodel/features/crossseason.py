@@ -367,4 +367,8 @@ def build_transitions(seasons: Iterable[int], source: str = "auto") -> pd.DataFr
             "opportunity_share_next": "next_opportunity_share",
         }
     )
+    # Team investment (draft capital, decayed) as-of season Y for each player.
+    from ffmodel.features.investment import add_investment
+
+    trans = add_investment(trans, source=source)
     return trans
