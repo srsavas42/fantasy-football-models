@@ -47,6 +47,8 @@ def conform(df: pd.DataFrame) -> pd.DataFrame:
     Missing stat columns become 0.0 (a source that lacks e.g. targets simply
     reports none); missing id columns become pd.NA. Column order is fixed.
     """
+    from ffmodel.data.teams import normalize_team
+
     out = df.copy()
     for col in PLAYER_WEEK_COLUMNS:
         if col not in out.columns:
@@ -55,4 +57,6 @@ def conform(df: pd.DataFrame) -> pd.DataFrame:
         out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
     for col in ("season", "week"):
         out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+    # Canonical franchise codes so legacy/nflverse agree and relocations collapse.
+    out["team"] = out["team"].map(normalize_team)
     return out[PLAYER_WEEK_COLUMNS]

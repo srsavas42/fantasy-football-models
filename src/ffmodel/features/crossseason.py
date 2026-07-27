@@ -32,8 +32,17 @@ CARRY_GROUP = ("RB", "QB", "WR")
 
 
 def player_key(df: pd.DataFrame) -> pd.Series:
-    """Offline-stable player identity (no player_id in the legacy CSVs)."""
-    return df["player_name"].astype(str) + "|" + df["position"].astype(str)
+    """Stable cross-season player identity.
+
+    Prefers the nflverse `player_id` (gsis) when present, which disambiguates
+    players who share a name across seasons; falls back to name+position for the
+    legacy CSVs, which carry no id.
+    """
+    name_pos = df["player_name"].astype(str) + "|" + df["position"].astype(str)
+    if "player_id" in df.columns and df["player_id"].notna().any():
+        pid = df["player_id"]
+        return pid.where(pid.notna(), name_pos).astype(str)
+    return name_pos
 
 
 def _shares(players: pd.DataFrame, team_targets: float, team_carries: float) -> pd.DataFrame:
@@ -336,11 +345,18 @@ def build_team_groups(
     players are absent; adding claimants dilutes the softmax).
     """
     resource = resource.lower()
-    positions = TARGET_GROUP if resource == "target" else CARRY_GROUP
-    count_col = "targets" if resource == "target" else "rush_att"
-    hist_col = "hist_target_share" if resource == "target" else "hist_carry_share"
-    prior_col = "target_share" if resource == "target" else "carry_share"
-    late_col = "late_target_share" if resource == "target" else "late_carry_share"
+    # (group positions, count column, hist col, prior col, late col). Passes have
+    # no late-season split, so they reuse the season level as the "late" signal.
+    spec = {
+        "target": (TARGET_GROUP, "targets", "hist_target_share", "target_share",
+                   "late_target_share"),
+        "carry": (CARRY_GROUP, "rush_att", "hist_carry_share", "carry_share",
+                  "late_carry_share"),
+        "pass": (("QB",), "pass_att", "hist_pass_share", "pass_share", "pass_share"),
+    }
+    if resource not in spec:
+        raise ValueError(f"unknown resource {resource!r}; expected target/carry/pass")
+    positions, count_col, hist_col, prior_col, late_col = spec[resource]
 
     usage = enrich_usage(seasons, source=source)
     seasons = sorted(set(seasons))
@@ -362,9 +378,14 @@ def build_team_groups(
         grp["label_share"] = grp[count_col] / grp["team_total"]
 
         # Usage history strictly from Y (Y+1 usage is the label — no leakage).
-        yf = usage[usage["season"] == y][["key", "team", hist_col, prior_col, late_col]]
-        yf = yf.rename(columns={hist_col: "hist_share", prior_col: "prior_share",
-                                late_col: "late_share", "team": "team_y"})
+        # `pass` reuses one column for prior + late, so build the rename carefully.
+        ren = {hist_col: "hist_share", prior_col: "prior_share", "team": "team_y"}
+        if late_col not in ren:
+            ren[late_col] = "late_share"
+        src = list(dict.fromkeys(["key", "team", hist_col, prior_col, late_col]))
+        yf = usage[usage["season"] == y][src].rename(columns=ren)
+        if "late_share" not in yf.columns:  # late aliased an already-renamed column
+            yf["late_share"] = yf["prior_share"]
         m = grp.merge(yf, on="key", how="left")
         m["is_rookie"] = m["hist_share"].isna().astype(int)  # no Y usage at all
         for c in ("hist_share", "prior_share", "late_share"):

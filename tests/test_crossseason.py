@@ -92,6 +92,34 @@ def test_team_groups_shares_sum_to_one():
     assert (rookies["hist_share"] == 0).all()
 
 
+def test_player_key_prefers_id_when_present():
+    df = pd.DataFrame({
+        "player_name": ["Mike Williams", "Mike Williams"],
+        "position": ["WR", "WR"],
+        "player_id": ["00-0001", "00-0002"],  # two distinct players, same name
+    })
+    keys = cs.player_key(df)
+    assert keys.iloc[0] != keys.iloc[1]  # disambiguated by id
+    # No id column -> name+position fallback.
+    noid = df.drop(columns=["player_id"])
+    assert (cs.player_key(noid) == "Mike Williams|WR").all()
+
+
+def test_pass_groups_sum_to_one():
+    g = cs.build_team_groups([2018, 2019], resource="pass", source="legacy")
+    assert (g["position"] == "QB").all()
+    sums = g.groupby("group_id")["label_share"].sum()
+    assert np.allclose(sums.to_numpy(), 1.0, atol=1e-9)
+
+
+def test_relocation_not_flagged_as_team_change():
+    # Rams players who stayed through the 2015 (STL) -> 2016 (LAR) move.
+    t = cs.build_transitions([2015, 2016], source="legacy")
+    rams = t[(t["transition"] == "2015->2016") & (t["team_next"] == "LAR")]
+    assert len(rams) > 0
+    assert rams["team_change"].sum() == 0
+
+
 def test_team_groups_carry_resource():
     g = cs.build_team_groups([2018, 2019], resource="carry", source="legacy")
     sums = g.groupby("group_id")["label_share"].sum()
