@@ -39,6 +39,20 @@ src/ffmodel/
     legacy.py       the CSVs committed to this repo (weekly 1999-2021, yearly 1970-2021,
                     snapcounts 2013-2020, FantasyPros ADP/ECR)
     loaders.py      load_player_weeks(seasons) — one call, one schema, auto source fallback
+    teams.py        canonical franchise codes (relocations collapse: STL/LA→LAR, OAK→LV)
+    identity.py     canonical gsis player dimension + cross-provider id joins
+    cfbd.py, coaching.py, odds.py, weather.py, sleeper.py   external sources
+  features/         raw stat lines → model-ready covariates:
+    trailing.py     the one leak-free EWMA builder (shift(1) then EWMA)
+    volume.py       team totals, usage shares; snaps.py  snap-share integration
+    crossseason.py  season usage, career history, vacated/competition,
+                    build_transitions (per-player) and build_team_groups (roster groups)
+    investment.py   draft capital; contracts.py  veteran contract commitment
+  models/
+    volume_season.py  hierarchical Beta — per-player next-season share
+    volume_alloc.py   Dirichlet-Multinomial — joint team allocation (shares sum to 1)
+  projections/
+    season_volume.py  next-season share distributions + breakout report
   simulation/
     scoring.py      stat line → fantasy points (reproduces the CSV point columns exactly)
 ```
@@ -113,6 +127,23 @@ The Beta share model is centered on year-over-year persistence (share is sticky)
 
 Modeling competition matters: for RBs the competition coefficient is strongly negative and it *unmasks* the vacated-opportunity signal (its coefficient roughly 6× larger once competition is controlled for). Net opportunity (vacated − competition) tracks realized carry-share change far better than vacated alone (Spearman ~0.26 vs ~0.03) — see `scripts/validate_crossseason.py`. It roughly matches a persistence baseline on point error but adds calibrated ~80% intervals and per-player breakout probabilities. v1 covers returning players as the subjects (rookies enter only as competition, not yet as projected players); the veteran-competition proxy and rookie draft data use the offline combine file, upgraded to nflverse draft picks when online.
 
+### Joint team allocation (the volume model)
+
+Projecting each player's share independently leaves shares that don't sum to 1 on a team. The allocation model treats each team-position roster as one simplex:
+
+```python
+from ffmodel.features import crossseason as cs
+from ffmodel.models import volume_alloc as va
+
+groups = cs.build_team_groups(range(2015, 2021), resource="target")  # or "carry" / "pass"
+model = va.DirichletAllocation().fit(groups)
+model.predict_quantiles(groups)          # per-player share, P10/P50/P90, summing to 1 per team
+```
+
+Next-season opportunity counts follow a Dirichlet-Multinomial whose per-player concentration is a softmax over usage history, position age curves, and team investment. Two things become **structural** rather than covariates: **competition** (adding a claimant dilutes everyone through the softmax) and **vacated opportunity** (a departed player is simply absent from the group). Rookies sit in the group with zero usage history, carried by draft capital — the socket a full rookie model drops into later. Targets, carries, and passes are modeled as separate resources since each carries different fantasy value.
+
+**Team investment** (`features/investment.py`, `features/contracts.py`) supplies the organizational-commitment prior: the model is given raw draft value and a `draft_value × years_since_draft` interaction and *learns* the decay (fitted ≈ +0.48 / −0.21, a gentler fade than a hand-picked rate), plus veteran contract size and its fade over the deal.
+
 ## Roadmap
 
 | Phase | Scope | Status |
@@ -121,7 +152,8 @@ Modeling competition matters: for RBs the competition coefficient is strongly ne
 | 1 | Hybrid data layer (nflverse + legacy CSVs, parquet cache) | ✅ |
 | 2 | Features: usage shares, empirical role tiers, trailing efficiency, game script, active-set/injury logic | ✅ |
 | 3A | **Cross-season volume** (year-over-year share via hierarchical Beta) + breakout report | ✅ |
-| 3B | Within-season **volume models** (team plays/pass rate + Dirichlet-Multinomial share) | next |
+| 3A+ | **Joint team allocation** (Dirichlet-Multinomial over each team-position roster) + team investment (draft capital, contracts) | ✅ |
+| 3B | Within-season **volume models** (team plays/pass rate + weekly Dirichlet share) | next |
 | 4 | Efficiency models (yds/touch, TD, catch rate) | |
 | 5 | Simulation engine: posterior predictive → weekly & season point distributions | |
 | 6 | Evaluation: walk-forward backtests, CRPS/log-score, calibration | |
