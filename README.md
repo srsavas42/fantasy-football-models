@@ -1,41 +1,169 @@
-# Fantasy Football Modelling
+# Fantasy Football Distributional Modeling
 
-This project was undertaken with my interests for both fantasy football and statistical modelling in mind. To get data, I forked an initial repository. In revisiting the project, I found a python library that includes more data, allowing me to expand my analysis. 
+Statistical models that produce **distributions** of fantasy football outcomes — not point estimates — on both season-long and weekly horizons, supporting three pillars:
 
-The models can be found in the "models" folder.
+1. **Draft value** — tier gaps, pre-season expected value, and mid-draft positional trade-offs.
+2. **Volume prediction** — opportunity is king; predict each player's share of team plays.
+3. **Weekly outcomes** — per-week outcome distributions for start/sit and lineup optimization.
 
-## The Plan
-Below is my general plan for creating a fantasy football analysis, including optimizing for draft strategy, player prediction, and weekly start/sit.
+## Architecture
 
-### 1: Draft Value Analysis
-Fantasy football leagues start with a draft, where NFL players are selected to be on different teams. During a week, a team can start 1 QB, 2 RBs, 2 WRs, 1 TE, and 1 FLEX (RB/WR/TE). Each week, teams are placed head-to-head, where the team with the most points will win.
+Fantasy points for a player-week are simulated bottom-up, with each layer a hierarchical Bayesian model (PyMC):
 
-#### Tier-Based Relative Value
-This plan is to first get the relative value for each position, with the objective of finding the biggest differences in player tier performance (i.e. top 4 RBs vs top 8). Tier gaps aim to compare the difference in value between positions at any point in the draft to determine which position should be prioritized. [DONE]
+```
+team plays & pass rate  →  opportunity share  →  per-touch efficiency  →  scoring
+   (NegBinom/Binomial)     (Dirichlet-Multinomial      (hierarchical         (PPR /
+                            over the active roster)     Normal/Poisson)       Half / Std)
+```
 
-#### Pre-Season Expected Value
-The next step is to take the expected value of each player. This entails mapping pre-season rankings to end-of-season rankings to create a distribution of outcomes and an expected value for their scoring. This is important because pre-season and post-season rankings are always significantly different, and understanding the risk/reward trade-off for a player is important to building a team.
+Sampling all layers over posterior draws yields the full outcome distribution; season projections aggregate simulated weeks. Because opportunity shares renormalize over whoever is *active*, a starter's injury automatically flows volume to backups.
 
-#### Mid-Draft Trade-offs
-The final step is to get the comparative value at a particular draft position relative to the next set of players I would be able to draft. For example, is it better to take a QB this round, or should I wait 3 more rounds for a QB in the next tier. This is how I can turn my analysis into actionable draft strategy.
+Key modeling choices:
 
-### 2: Volume Prediction
-One core tenent of fantasy football is that opportunity is king: players with more opportunities to touch the ball have more opportunities to score points. So, I want to do an analysis to try and predict the volume a player would get over the course of the season. I have identified the following critical factors:
+- **Empirical roles over listed depth charts.** Role tiers come from EWMA trailing snap share (route participation where available); listed depth charts + ADP/ECR are only a cold-start fallback for week 1, rookies, and team changes.
+- **Efficiency feeds volume.** Trailing per-opportunity efficiency (yds/route-run, yds/touch) enters the share model — coaches route opportunity to efficient players.
+- **Partial pooling everywhere.** Small-sample players shrink toward position-level priors.
+- **Calibration is the acceptance gate.** Walk-forward backtests score CRPS/log-score against prior-season-PPG and ECR baselines, with PIT/coverage checks that intervals are honest.
 
-1) Depth Chart Position: A player who is starting at the beginning of the season is more likely to get significant opportunity than a player who is a backup.
-2) Coach Scheme: Coaches have different tendencies --- one team might like to throw the ball more, another wants to run. This impacts the opportunity players at different positions have to get the ball.
-3) Injury Risk: Individual players get hurt, which limits their opportunity to play and score. However, when a starter gets hurt, their backup steps into the starting role, changing the dynamics of volume.
+## Package
 
-However, changes in volume can come with side effects, such as potentially decreasing efficiency. So, I would like to do some exploratory analysis on these relationships to get a better understanding of individual prediction.
+Code lives in an installable package under `src/ffmodel/`:
 
-### 3: Weekly Outcomes
-As stated earlier, players have to choose a starting lineup. However, all players can change their starting lineup on different weeks. So, I would like to create a model to predict the distribution of outcomes for any given week such that I can choose a starting lineup by optimizing for various parameters such as expected point totals or upside.
+```
+src/ffmodel/
+  config.py       scoring rules (verified against this repo's CSVs), paths, season coverage
+  data/           hybrid data layer:
+    schema.py       canonical player-week schema shared by every source
+    ingest.py       nflverse via nflreadpy, parquet-cached (weekly, PBP, snaps, depth charts,
+                    injuries, schedules, rosters, id map)
+    legacy.py       the CSVs committed to this repo (weekly 1999-2021, yearly 1970-2021,
+                    snapcounts 2013-2020, FantasyPros ADP/ECR)
+    loaders.py      load_player_weeks(seasons) — one call, one schema, auto source fallback
+    teams.py        canonical franchise codes (relocations collapse: STL/LA→LAR, OAK→LV)
+    identity.py     canonical gsis player dimension + cross-provider id joins
+    cfbd.py, coaching.py, odds.py, weather.py, sleeper.py   external sources
+  features/         raw stat lines → model-ready covariates:
+    trailing.py     the one leak-free EWMA builder (shift(1) then EWMA)
+    volume.py       team totals, usage shares; snaps.py  snap-share integration
+    crossseason.py  season usage, career history, vacated/competition,
+                    build_transitions (per-player) and build_team_groups (roster groups)
+    investment.py   draft capital; contracts.py  veteran contract commitment
+  models/
+    volume_season.py  hierarchical Beta — per-player next-season share
+    volume_alloc.py   Dirichlet-Multinomial — joint team allocation (shares sum to 1)
+  projections/
+    season_volume.py  next-season share distributions + breakout report
+  simulation/
+    scoring.py      stat line → fantasy points (reproduces the CSV point columns exactly)
+```
+
+### Quickstart
+
+```bash
+pip install -e ".[dev]"        # add ".[models]" for pymc/arviz when fitting
+pytest                          # network-free test suite
+
+python -c "
+from ffmodel.data import load_player_weeks
+df = load_player_weeks([2019, 2020])
+print(df.head())
+"
+```
+
+`load_player_weeks` tries nflverse first (richer: player ids, real targets, 18-week seasons kept current) and falls back to the committed CSVs per season when offline.
+
+### Data acquisition
+
+The provider-aware data CLI caches parquet plus provenance manifests and keeps
+mutable inputs as immutable `as_of` snapshots:
+
+```bash
+ffmodel-data doctor
+ffmodel-data bootstrap --seasons 2022 2023 2024 2025
+ffmodel-data nflverse --seasons 2022 2023 2024 2025 --datasets pbp
+ffmodel-data sleeper
+```
+
+CollegeFootballData reads its credential from the Git-ignored project `.env`,
+caches every response as Parquet, and enforces local/per-run quota guards. The
+Odds API is intentionally deferred. Open-Meteo and Sleeper require no key.
+Setup, scheduling, licensing, and point-in-time backtest instructions are in
+[docs/data-sources.md](docs/data-sources.md).
+
+Wikipedia HC/OC assignments and coach lineage use a separate, resumable pull:
+
+```bash
+pip install -e ".[scrape]"
+ffmodel-coaches                       # every committed team-season, 1970-2021
+ffmodel-coaches --seasons 2018:2025  # add nflverse-backed recent seasons
+```
+
+The command archives exact MediaWiki revisions in the ignored cache and writes
+source-attributed assignment, career-history, selected scheme-source, lineage,
+and review tables under `data/coaching/wikipedia/`. Wikipedia job titles are not
+proof of play-calling responsibility; confirmed effective-date overrides remain
+in `data/manual/coach_team_period.csv`. See the coaching section of the data
+source guide before using the lineage as a model prior.
+
+### Cross-season volume & breakout report (Phase 3A)
+
+```python
+from ffmodel.features import crossseason as cs
+from ffmodel.models import volume_season as vs
+from ffmodel.projections import season_volume as sv
+
+trans = cs.build_transitions(range(2015, 2021), source="legacy")   # returning players, Y->Y+1
+train, test = trans[trans.transition < "2019->2020"], trans[trans.transition == "2019->2020"]
+
+target_model = vs.fit_target_share(train)     # hierarchical Beta (needs the ".[models]" extra)
+carry_model  = vs.fit_carry_share(train)
+sv.breakout_report(test, target_model, carry_model, threshold=0.05)  # ranked P(volume uptick)
+```
+
+The Beta share model is centered on year-over-year persistence (share is sticky) and adjusts for both sides of the opportunity ledger:
+
+- **Vacated opportunity** — volume freed when teammates leave (from roster diffs).
+- **Incoming competition** — volume claimed by players *arriving* at the same position: signed/traded veterans (their prior-team share) and drafted rookies (draft capital, `features/draft.py`). This is the other half — freed targets mean little if the team also signed a star and drafted a receiver.
+
+Modeling competition matters: for RBs the competition coefficient is strongly negative and it *unmasks* the vacated-opportunity signal (its coefficient roughly 6× larger once competition is controlled for). Net opportunity (vacated − competition) tracks realized carry-share change far better than vacated alone (Spearman ~0.26 vs ~0.03) — see `scripts/validate_crossseason.py`. It roughly matches a persistence baseline on point error but adds calibrated ~80% intervals and per-player breakout probabilities. v1 covers returning players as the subjects (rookies enter only as competition, not yet as projected players); the veteran-competition proxy and rookie draft data use the offline combine file, upgraded to nflverse draft picks when online.
+
+### Joint team allocation (the volume model)
+
+Projecting each player's share independently leaves shares that don't sum to 1 on a team. The allocation model treats each team-position roster as one simplex:
+
+```python
+from ffmodel.features import crossseason as cs
+from ffmodel.models import volume_alloc as va
+
+groups = cs.build_team_groups(range(2015, 2021), resource="target")  # or "carry" / "pass"
+model = va.DirichletAllocation().fit(groups)
+model.predict_quantiles(groups)          # per-player share, P10/P50/P90, summing to 1 per team
+```
+
+Next-season opportunity counts follow a Dirichlet-Multinomial whose per-player concentration is a softmax over usage history, position age curves, and team investment. Two things become **structural** rather than covariates: **competition** (adding a claimant dilutes everyone through the softmax) and **vacated opportunity** (a departed player is simply absent from the group). Rookies sit in the group with zero usage history, carried by draft capital — the socket a full rookie model drops into later. Targets, carries, and passes are modeled as separate resources since each carries different fantasy value.
+
+**Team investment** (`features/investment.py`, `features/contracts.py`) supplies the organizational-commitment prior: the model is given raw draft value and a `draft_value × years_since_draft` interaction and *learns* the decay (fitted ≈ +0.48 / −0.21, a gentler fade than a hand-picked rate), plus veteran contract size and its fade over the deal.
+
+## Roadmap
+
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | Package scaffolding, config, scoring, tests | ✅ |
+| 1 | Hybrid data layer (nflverse + legacy CSVs, parquet cache) | ✅ |
+| 2 | Features: usage shares, empirical role tiers, trailing efficiency, game script, active-set/injury logic | ✅ |
+| 3A | **Cross-season volume** (year-over-year share via hierarchical Beta) + breakout report | ✅ |
+| 3A+ | **Joint team allocation** (Dirichlet-Multinomial over each team-position roster) + team investment (draft capital, contracts) | ✅ |
+| 3B | Within-season **volume models** (team plays/pass rate + weekly Dirichlet share) | next |
+| 4 | Efficiency models (yds/touch, TD, catch rate) | |
+| 5 | Simulation engine: posterior predictive → weekly & season point distributions | |
+| 6 | Evaluation: walk-forward backtests, CRPS/log-score, calibration | |
+| 7 | Weekly pillar: start/sit lineup optimization | |
+| 8 | Draft pillar: tiers, pre-season EV, positional trade-offs | |
+| 9 | Alt-data signal layer: BlueSky/news → live role-prior adjustments (not backtestable, so live-only) | |
 
 # Fantasy Football Data Sets
 
-If you are looking to run the scripts we've provided for locally updating data, clone this repo and install dependencies.
-
-    pip install -r requirements.txt
+This repo began as a fork of [fantasydatapros/data](https://github.com/fantasydatapros/data); the CSVs below remain available and power the legacy loaders and offline tests.
 
 ## Strength of Schedule data
 Strength of Schedule data is available in the sos directory. Data is available going back to 1999. To load this data in pandas using the following the following url format:
@@ -67,7 +195,3 @@ To grab yearly data for 2019 in pandas, do the following:
 
     import pandas as pd
     df = pd.read_csv('https://raw.githubusercontent.com/fantasydatapros/data/master/yearly/2019.csv')
-
-
-
-
